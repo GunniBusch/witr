@@ -63,9 +63,9 @@ jobs:
 
     steps:
       - name: Download artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
-          path: dist
+          path: artifacts
           pattern: ${{ env.PROJECT_NAME }}-*
           merge-multiple: true
 
@@ -74,17 +74,17 @@ jobs:
           sparse-checkout: |
             docs/*
           sparse-checkout-cone-mode: false
-      - name: Package binaries and checksums
+
+      - name: Create checksums
         run: |
-          sha256sum dist/* > SHA256SUMS
+          sha256sum artifacts/* > SHA256SUMS
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
-
         with:
           generate_release_notes: true
           files: |
-            dist/*
+            artifacts/*
             docs/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
