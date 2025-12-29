@@ -23,6 +23,7 @@ jobs:
     env:
       VERSION: ${{ github.ref_name }}
       COMMIT: ${{ github.sha }}
+      BINARY_NAME: $${{env.PROJECT_NAME}}-${{ matrix.os }}-${{ matrix.arch }}
     strategy:
       matrix:
         os: [ linux, darwin ]
@@ -37,24 +38,21 @@ jobs:
       - name: Build binary (cross-compile, optimized)
         run: |
           DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-          COMMIT_SHORT=$(git rev-parse --short HEAD)
-          BIN=${PROJECT_NAME}-${{ matrix.os }}-${{ matrix.arch }}
           mkdir -p dist
           CGO_ENABLED=0 \
           GOOS=${{ matrix.os }} GOARCH=${{ matrix.arch }} \
-          go build -trimpath -ldflags "-s -w -X main.version=${VERSION} -X main.commit=${COMMIT_SHORT} -X 'main.buildDate=${DATE}'" -o dist/${BIN} ./cmd/witr
+          go build -trimpath -ldflags "-s -w -X main.version=${VERSION} -X main.commit=${COMMIT} -X 'main.buildDate=${DATE}'" -o ./cmd/witr
 
       - name: Strip linux binary for smaller size
         if: matrix.os == 'linux'
         run: |
-          BIN=${PROJECT_NAME}-${{ matrix.os }}-${{ matrix.arch }}
-          strip dist/${BIN} || true
+          strip cmd/witr || true
 
       - name: Upload binary artifact
         uses: actions/upload-artifact@v6
         with:
-          name: ${{ env.PROJECT_NAME }}-${{ matrix.os }}-${{ matrix.arch }}
-          path: dist/${{ env.PROJECT_NAME }}-${{ matrix.os }}-${{ matrix.arch }}
+          name: ${{ env.BINARY_NAME }}
+          path: cmd/witr
 
   publish:
     name: Publish Release
@@ -62,7 +60,8 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v6
+      - name: Checkout docs only
+        uses: actions/checkout@v6
         with:
           sparse-checkout: |
             docs/*
