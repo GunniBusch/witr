@@ -23,7 +23,7 @@ jobs:
     env:
       VERSION: ${{ github.ref_name }}
       COMMIT: ${{ github.sha }}
-      BINARY_NAME: $${{env.PROJECT_NAME}}-${{ matrix.os }}-${{ matrix.arch }}
+      BINARY_NAME: ${{env.PROJECT_NAME}}-${{ matrix.os }}-${{ matrix.arch }}
     strategy:
       matrix:
         os: [ linux, darwin ]
