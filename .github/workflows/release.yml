@@ -62,18 +62,18 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      - uses: actions/checkout@v6
+        with:
+          sparse-checkout: |
+            docs/*
+          sparse-checkout-cone-mode: false
+
       - name: Download artifacts
         uses: actions/download-artifact@v7
         with:
           path: artifacts
           pattern: ${{ env.PROJECT_NAME }}-*
           merge-multiple: true
-
-      - uses: actions/checkout@v6
-        with:
-          sparse-checkout: |
-            docs/*
-          sparse-checkout-cone-mode: false
 
       - name: Create checksums
         run: |
