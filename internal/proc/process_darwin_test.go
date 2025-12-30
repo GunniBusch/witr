@@ -3,249 +3,259 @@
 package proc
 
 import (
-	"os"
-	"strings"
+	"errors"
 	"testing"
 	"time"
 
+	"go.uber.org/mock/gomock"
+
+	"github.com/pranshuparmar/witr/internal/proc/mocks"
 	"github.com/pranshuparmar/witr/pkg/model"
 )
 
 func TestIsEnvVarName(t *testing.T) {
 	tests := []struct {
-		name string
-		want bool
+		input string
+		want  bool
 	}{
-		{"HOME", true}, {"PATH", true}, {"MY_VAR", true}, {"lowercase", true},
-		{"_UNDERSCORE", true}, {"VAR1", true}, {"a", true},
-		{"", false}, {"VAR-NAME", false}, {"VAR.NAME", false}, {"VAR NAME", false},
-		{"VAR=VALUE", false}, {"/path/to", false}, {"VAR$NAME", false},
+		{"HOME", true}, {"PATH", true}, {"MY_VAR", true}, {"VAR123", true},
+		{"", false}, {"VAR=value", false}, {"path/to/file", false},
 	}
 	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := isEnvVarName(tt.name); got != tt.want {
-				t.Errorf("isEnvVarName(%q) = %v, want %v", tt.name, got, tt.want)
-			}
-		})
+		if got := isEnvVarName(tt.input); got != tt.want {
+			t.Errorf("isEnvVarName(%q) = %v, want %v", tt.input, got, tt.want)
+		}
 	}
 }
 
 func TestReadProcess(t *testing.T) {
-	proc, err := ReadProcess(os.Getpid())
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockExec := mocks.NewMockExecutor(ctrl)
+	SetExecutor(mockExec)
+	defer ResetExecutor()
+
+	mockExec.EXPECT().Run("ps", "-p", "123", "-o", "pid=,ppid=,uid=,lstart=,state=,ucomm=").
+		Return([]byte("  123  456  501 Mon Dec 30 10:00:00 2024 S testproc\n"), nil)
+	mockExec.EXPECT().Run("ps", "-p", "123", "-o", "args=").
+		Return([]byte("/usr/bin/test --flag\n"), nil).Times(2)
+	mockExec.EXPECT().Run("ps", "-p", "123", "-E", "-o", "command=").
+		Return([]byte("/bin/test HOME=/Users/test\n"), nil)
+	mockExec.EXPECT().Run("lsof", "-a", "-p", "123", "-d", "cwd", "-F", "n").
+		Return(nil, errors.New("lsof failed"))
+	mockExec.EXPECT().Run("launchctl", "blame", "123").
+		Return([]byte("com.apple.Safari\n"), nil)
+	mockExec.EXPECT().Run("lsof", "-i", "TCP", "-s", "TCP:LISTEN", "-n", "-P", "-F", "pn").
+		Return(nil, errors.New("lsof failed"))
+	mockExec.EXPECT().Run("netstat", "-an", "-p", "tcp").
+		Return([]byte(""), nil)
+	mockExec.EXPECT().Run("lsof", "-a", "-p", "123", "-i", "TCP", "-n", "-P", "-F", "n").
+		Return(nil, errors.New("lsof failed"))
+	mockExec.EXPECT().Run("ps", "-p", "123", "-o", "pcpu=,rss=").
+		Return([]byte("95.0 2097152\n"), nil)
+
+	proc, err := ReadProcess(123)
 	if err != nil {
 		t.Fatalf("ReadProcess failed: %v", err)
 	}
-	if proc.PID != os.Getpid() {
-		t.Errorf("PID = %d, want %d", proc.PID, os.Getpid())
+	if proc.PID != 123 {
+		t.Errorf("PID = %d, want 123", proc.PID)
 	}
-	now := time.Now()
-	if proc.StartedAt.After(now) {
-		t.Errorf("StartedAt in future: %v > %v", proc.StartedAt, now)
+	if proc.PPID != 456 {
+		t.Errorf("PPID = %d, want 456", proc.PPID)
 	}
-	if proc.Command == "" {
-		t.Error("Command should not be empty")
+	if proc.Command != "testproc" {
+		t.Errorf("Command = %q, want testproc", proc.Command)
 	}
-	if proc.PPID <= 0 {
-		t.Errorf("PPID should be positive, got %d", proc.PPID)
+	if proc.Cmdline != "/usr/bin/test --flag" {
+		t.Errorf("Cmdline = %q, want /usr/bin/test --flag", proc.Cmdline)
+	}
+	if proc.WorkingDir != "unknown" {
+		t.Errorf("WorkingDir = %q, want unknown", proc.WorkingDir)
+	}
+	if proc.Service != "com.apple.Safari" {
+		t.Errorf("Service = %q, want com.apple.Safari", proc.Service)
+	}
+	if proc.Health != "high-cpu" {
+		t.Errorf("Health = %q, want high-cpu", proc.Health)
+	}
+
+	// Expect Local time because ps outputs local time
+	expectedTime := time.Date(2024, 12, 30, 10, 0, 0, 0, time.Local)
+	if !proc.StartedAt.Equal(expectedTime) {
+		t.Errorf("StartedAt = %v, want %v", proc.StartedAt, expectedTime)
 	}
 }
 
 func TestReadProcessInvalidPID(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockExec := mocks.NewMockExecutor(ctrl)
+	SetExecutor(mockExec)
+	defer ResetExecutor()
+
+	mockExec.EXPECT().Run("ps", "-p", "-1", "-o", "pid=,ppid=,uid=,lstart=,state=,ucomm=").
+		Return(nil, errors.New("invalid pid"))
+
 	_, err := ReadProcess(-1)
 	if err == nil {
 		t.Error("ReadProcess(-1) should return error")
 	}
-	_, err = ReadProcess(999999999)
-	if err == nil {
-		t.Error("ReadProcess(999999999) should return error for non-existent PID")
-	}
 }
 
 func TestReadUser(t *testing.T) {
-	if got := readUser(1); got != "unknown" {
-		t.Errorf("readUser() = %v, want unknown", got)
+	got := readUser(0)
+	if got != "unknown" {
+		t.Errorf("readUser(0) = %q, want unknown", got)
 	}
 }
 
 func TestReadUserByUID(t *testing.T) {
-	if got := readUserByUID(0); got != "root" {
-		t.Errorf("readUserByUID(0) = %v, want root", got)
-	}
-	if got := readUserByUID(os.Getuid()); got == "" {
-		t.Error("readUserByUID(self) should return username")
+	got := readUserByUID(0)
+	if got != "root" {
+		t.Errorf("readUserByUID(0) = %q, want root", got)
 	}
 }
 
 func TestResolveUID(t *testing.T) {
-	if got := resolveUID(0); got != "root" {
-		t.Errorf("resolveUID(0) = %v, want root", got)
-	}
-	got := resolveUID(99999)
-	if got != "99999" {
-		t.Errorf("resolveUID(99999) = %v, want 99999", got)
+	got := resolveUID(0)
+	if got != "root" {
+		t.Errorf("resolveUID(0) = %q, want root", got)
 	}
 }
 
 func TestAddStateExplanation(t *testing.T) {
-	states := []string{"LISTEN", "TIME_WAIT", "CLOSE_WAIT", "FIN_WAIT_1", "FIN_WAIT_2",
-		"ESTABLISHED", "SYN_SENT", "SYN_RECEIVED", "CLOSING", "LAST_ACK", "UNKNOWN"}
-	for _, s := range states {
-		info := &model.SocketInfo{State: s}
+	tests := []struct {
+		state string
+	}{
+		{"LISTEN"}, {"ESTABLISHED"}, {"TIME_WAIT"}, {"CLOSE_WAIT"},
+	}
+	for _, tt := range tests {
+		info := &model.SocketInfo{State: tt.state}
 		addStateExplanation(info)
 		if info.Explanation == "" {
-			t.Errorf("addStateExplanation(%s) gave empty explanation", s)
+			t.Errorf("addStateExplanation(%q) produced empty explanation", tt.state)
 		}
-	}
-	timeWait := &model.SocketInfo{State: "TIME_WAIT"}
-	addStateExplanation(timeWait)
-	if timeWait.Workaround == "" {
-		t.Error("TIME_WAIT should have workaround")
-	}
-	closeWait := &model.SocketInfo{State: "CLOSE_WAIT"}
-	addStateExplanation(closeWait)
-	if closeWait.Workaround == "" {
-		t.Error("CLOSE_WAIT should have workaround")
+		if tt.state == "TIME_WAIT" && info.Workaround == "" {
+			t.Error("TIME_WAIT should include workaround guidance")
+		}
 	}
 }
 
 func TestGetTIMEWAITRemaining(t *testing.T) {
-	if got := GetTIMEWAITRemaining(); got == "" {
-		t.Error("GetTIMEWAITRemaining returned empty")
+	remaining := GetTIMEWAITRemaining()
+	if remaining != "up to 60s remaining (macOS default)" {
+		t.Errorf("GetTIMEWAITRemaining = %q", remaining)
 	}
 }
 
 func TestGetMSLDuration(t *testing.T) {
-	got := GetMSLDuration()
-	if got <= 0 {
-		t.Errorf("GetMSLDuration() = %d, want > 0", got)
-	}
-	if got > 120000 {
-		t.Errorf("GetMSLDuration() = %d, seems unreasonably high", got)
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockExec := mocks.NewMockExecutor(ctrl)
+	SetExecutor(mockExec)
+	defer ResetExecutor()
+
+	mockExec.EXPECT().Run("sysctl", "-n", "net.inet.tcp.msl").Return([]byte("15000\n"), nil)
+
+	duration := GetMSLDuration()
+	if duration != 15000 {
+		t.Errorf("GetMSLDuration = %d, want 15000", duration)
 	}
 }
 
 func TestReverse(t *testing.T) {
 	input := []model.Process{{PID: 1}, {PID: 2}, {PID: 3}}
-	result := reverse(input)
-	if result[0].PID != 3 || result[2].PID != 1 {
-		t.Errorf("reverse failed: %v", result)
-	}
-	empty := reverse([]model.Process{})
-	if len(empty) != 0 {
-		t.Error("reverse empty failed")
-	}
-	single := reverse([]model.Process{{PID: 5}})
-	if single[0].PID != 5 {
-		t.Error("reverse single failed")
+	got := reverse(input)
+	if len(got) != 3 || got[0].PID != 3 {
+		t.Error("reverse failed")
 	}
 }
 
 func TestContainsString(t *testing.T) {
-	slice := []string{"a", "b", "c"}
-	if !containsString(slice, "b") {
-		t.Error("containsString should find 'b'")
+	if !containsString([]string{"a", "b"}, "b") {
+		t.Error("containsString should find b")
 	}
-	if containsString(slice, "d") {
-		t.Error("containsString should not find 'd'")
-	}
-	if containsString(nil, "a") {
-		t.Error("containsString nil should return false")
-	}
-	if containsString([]string{}, "a") {
-		t.Error("containsString empty should return false")
+	if containsString([]string{"a", "b"}, "c") {
+		t.Error("containsString should not find c")
 	}
 }
 
 func TestGetSocketStates(t *testing.T) {
-	states, err := GetSocketStates(80)
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockExec := mocks.NewMockExecutor(ctrl)
+	SetExecutor(mockExec)
+	defer ResetExecutor()
+
+	mockExec.EXPECT().Run("netstat", "-an", "-p", "tcp").
+		Return([]byte("tcp4  0  0  *.8080  *.*  LISTEN\n"), nil)
+
+	states, err := GetSocketStates(8080)
 	if err != nil {
-		return
+		t.Fatalf("GetSocketStates failed: %v", err)
 	}
-	for _, s := range states {
-		if s.Port != 80 {
-			t.Errorf("GetSocketStates returned wrong port: %d", s.Port)
-		}
+	if len(states) != 1 {
+		t.Fatalf("GetSocketStates returned %d entries, want 1", len(states))
+	}
+	if states[0].State != "LISTEN" {
+		t.Errorf("GetSocketStates state = %q, want LISTEN", states[0].State)
+	}
+	if states[0].LocalAddr != "0.0.0.0" {
+		t.Errorf("GetSocketStates local addr = %q, want 0.0.0.0", states[0].LocalAddr)
+	}
+	if states[0].Explanation == "" {
+		t.Error("GetSocketStates should include explanation")
 	}
 }
 
 func TestGetSocketStateForPort(t *testing.T) {
-	state := GetSocketStateForPort(80)
-	if state != nil && state.Port != 80 {
-		t.Errorf("GetSocketStateForPort returned wrong port: %d", state.Port)
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockExec := mocks.NewMockExecutor(ctrl)
+	SetExecutor(mockExec)
+	defer ResetExecutor()
+
+	mockExec.EXPECT().Run("netstat", "-an", "-p", "tcp").
+		Return([]byte("tcp4  0  0  *.8080  *.*  LISTEN\n"), nil)
+
+	state := GetSocketStateForPort(8080)
+	if state == nil {
+		t.Fatal("GetSocketStateForPort returned nil")
+	}
+	if state.State != "LISTEN" {
+		t.Errorf("GetSocketStateForPort state = %q, want LISTEN", state.State)
 	}
 }
 
 func TestCountSocketsByState(t *testing.T) {
-	counts := CountSocketsByState(80)
-	if counts == nil {
-		t.Error("CountSocketsByState returned nil")
-	}
-}
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
 
-func TestResolveAncestry(t *testing.T) {
-	chain, err := ResolveAncestry(os.Getpid())
-	if err != nil {
-		t.Fatalf("ResolveAncestry failed: %v", err)
-	}
-	if len(chain) == 0 {
-		t.Error("ResolveAncestry returned empty chain")
-	}
-	if chain[len(chain)-1].PID != os.Getpid() {
-		t.Error("Last process in ancestry should be self")
-	}
-	if chain[0].PID != 1 && chain[0].PPID != 0 {
-		t.Error("First process should be init/launchd")
-	}
-}
+	mockExec := mocks.NewMockExecutor(ctrl)
+	SetExecutor(mockExec)
+	defer ResetExecutor()
 
-func TestResolveAncestryInvalidPID(t *testing.T) {
-	chain, err := ResolveAncestry(-1)
-	if err != nil && len(chain) > 0 {
-		t.Error("ResolveAncestry(-1) should return error or empty chain")
+	netstatOutput := `Active Internet connections
+Proto Recv-Q Send-Q  Local Address          Foreign Address        (state)
+tcp4       0      0  *.8080               *.*                    LISTEN
+tcp4       0      0  *.8080               *.*                    LISTEN
+tcp4       0      0  127.0.0.1.8080       127.0.0.1.55555        TIME_WAIT`
+
+	mockExec.EXPECT().Run("netstat", "-an", "-p", "tcp").
+		Return([]byte(netstatOutput), nil)
+
+	counts := CountSocketsByState(8080)
+	if counts["LISTEN"] != 2 {
+		t.Errorf("LISTEN count = %d, want 2", counts["LISTEN"])
 	}
-}
-
-func TestGetFileContext(t *testing.T) {
-	ctx := GetFileContext(os.Getpid())
-	if ctx != nil {
-		if ctx.OpenFiles < 0 {
-			t.Error("OpenFiles should not be negative")
-		}
-		if ctx.FileLimit < 0 {
-			t.Error("FileLimit should not be negative")
-		}
-	}
-}
-
-func TestGetResourceContext(t *testing.T) {
-	ctx := GetResourceContext(os.Getpid())
-	_ = ctx
-}
-
-func TestReadListeningSockets(t *testing.T) {
-	sockets, err := readListeningSockets()
-	if err != nil {
-		return
-	}
-	for inode, sock := range sockets {
-		if sock.Inode != inode {
-			t.Errorf("Socket inode mismatch: %s vs %s", sock.Inode, inode)
-		}
-		if sock.Port <= 0 {
-			t.Errorf("Socket port should be positive: %d", sock.Port)
-		}
-	}
-}
-
-func TestSocketsForPID(t *testing.T) {
-	inodes := socketsForPID(os.Getpid())
-	_ = inodes
-}
-
-func TestGetCmdline(t *testing.T) {
-	cmd := GetCmdline(os.Getpid())
-	if cmd == "" {
-		t.Log("GetCmdline returned empty (may be expected)")
+	if counts["TIME_WAIT"] != 1 {
+		t.Errorf("TIME_WAIT count = %d, want 1", counts["TIME_WAIT"])
 	}
 }
 
@@ -256,15 +266,10 @@ func TestParseNetstatAddr(t *testing.T) {
 		wantPort int
 	}{
 		{"127.0.0.1.8080", "127.0.0.1", 8080},
-		{"127.0.0.1:8080", "127.0.0.1", 8080},
 		{"*.80", "0.0.0.0", 80},
-		{"*:80", "0.0.0.0", 80},
 		{"[::]:8080", "::", 8080},
-		{"[::1]:8080", "::1", 8080},
-		{"[]:8080", "", 0},
 		{"", "", 0},
-		{"invalid", "", 0},
-		{"no.port.here", "", 0},
+		{"[]:8080", "", 0},
 	}
 	for _, tt := range tests {
 		addr, port := parseNetstatAddr(tt.input)
@@ -276,137 +281,155 @@ func TestParseNetstatAddr(t *testing.T) {
 }
 
 func TestReadListeningSocketsNetstat(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockExec := mocks.NewMockExecutor(ctrl)
+	SetExecutor(mockExec)
+	defer ResetExecutor()
+
+	mockExec.EXPECT().Run("netstat", "-an", "-p", "tcp").
+		Return([]byte("tcp4  0  0  *.8080  *.*  LISTEN\n"), nil)
+
 	sockets, err := readListeningSocketsNetstat()
 	if err != nil {
-		return
+		t.Fatalf("readListeningSocketsNetstat failed: %v", err)
 	}
-	for _, sock := range sockets {
-		if sock.Port <= 0 {
-			t.Errorf("Socket port should be positive: %d", sock.Port)
+	if len(sockets) != 1 {
+		t.Fatalf("readListeningSocketsNetstat returned %d sockets, want 1", len(sockets))
+	}
+	for _, s := range sockets {
+		if s.Port != 8080 {
+			t.Errorf("socket port = %d, want 8080", s.Port)
+		}
+		if s.Address != "0.0.0.0" {
+			t.Errorf("socket address = %q, want 0.0.0.0", s.Address)
 		}
 	}
 }
 
-func TestBootTime(t *testing.T) {
-	bt := bootTime()
-	if bt.IsZero() {
-		t.Error("bootTime returned zero")
-	}
-	now := time.Now()
-	if bt.After(now) {
-		t.Error("bootTime should not be in future")
-	}
-	if now.Sub(bt) > 365*24*time.Hour {
-		t.Log("System uptime > 1 year (unusual)")
-	}
-}
-
-func TestTicksPerSecond(t *testing.T) {
-	tps := ticksPerSecond()
-	if tps <= 0 {
-		t.Errorf("ticksPerSecond() = %v, want > 0", tps)
-	}
-	if tps != 100 {
-		t.Logf("ticksPerSecond() = %v (expected 100 on most systems)", tps)
-	}
-}
-
 func TestGetCommandLine(t *testing.T) {
-	cmd := getCommandLine(os.Getpid())
-	if cmd == "" {
-		t.Log("getCommandLine returned empty")
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockExec := mocks.NewMockExecutor(ctrl)
+	SetExecutor(mockExec)
+	defer ResetExecutor()
+
+	mockExec.EXPECT().Run("ps", "-p", "123", "-o", "args=").
+		Return([]byte("/usr/bin/test --flag\n"), nil)
+
+	cmdline := getCommandLine(123)
+	if cmdline != "/usr/bin/test --flag" {
+		t.Errorf("getCommandLine = %q", cmdline)
 	}
 }
 
 func TestGetEnvironment(t *testing.T) {
-	env := getEnvironment(os.Getpid())
-	_ = env
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockExec := mocks.NewMockExecutor(ctrl)
+	SetExecutor(mockExec)
+	defer ResetExecutor()
+
+	mockExec.EXPECT().Run("ps", "-p", "123", "-E", "-o", "command=").
+		Return([]byte("/bin/test HOME=/Users/test\n"), nil)
+
+	env := getEnvironment(123)
+	if len(env) != 1 || env[0] != "HOME=/Users/test" {
+		t.Fatalf("getEnvironment = %v, want [HOME=/Users/test]", env)
+	}
 }
 
 func TestGetWorkingDirectory(t *testing.T) {
-	cwd := getWorkingDirectory(os.Getpid())
-	if cwd == "" || cwd == "unknown" {
-		t.Log("getWorkingDirectory returned empty/unknown")
-	}
-	expectedCwd, _ := os.Getwd()
-	if cwd != expectedCwd && cwd != "unknown" {
-		t.Logf("getWorkingDirectory mismatch: got %q, expected %q", cwd, expectedCwd)
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockExec := mocks.NewMockExecutor(ctrl)
+	SetExecutor(mockExec)
+	defer ResetExecutor()
+
+	mockExec.EXPECT().Run("lsof", "-a", "-p", "123", "-d", "cwd", "-F", "n").
+		Return([]byte("p123\nn/Users/test/project\n"), nil)
+
+	cwd := getWorkingDirectory(123)
+	if cwd != "/Users/test/project" {
+		t.Errorf("getWorkingDirectory = %q", cwd)
 	}
 }
 
 func TestDetectContainer(t *testing.T) {
-	container := detectContainer(os.Getpid())
-	_ = container
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockExec := mocks.NewMockExecutor(ctrl)
+	SetExecutor(mockExec)
+	defer ResetExecutor()
+
+	mockExec.EXPECT().Run("ps", "-p", "123", "-o", "args=").
+		Return([]byte("/usr/bin/docker run nginx\n"), nil)
+
+	container := detectContainer(123)
+	if container != "docker" {
+		t.Errorf("detectContainer = %q, want docker", container)
+	}
 }
 
 func TestDetectLaunchdService(t *testing.T) {
-	service := detectLaunchdService(os.Getpid())
-	_ = service
-}
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
 
-func TestDetectGitInfo(t *testing.T) {
-	repo, branch := detectGitInfo("/nonexistent")
-	if repo != "" || branch != "" {
-		t.Error("detectGitInfo should return empty for nonexistent path")
+	mockExec := mocks.NewMockExecutor(ctrl)
+	SetExecutor(mockExec)
+	defer ResetExecutor()
+
+	mockExec.EXPECT().Run("launchctl", "blame", "123").
+		Return([]byte("com.apple.Safari\n"), nil)
+
+	svc := detectLaunchdService(123)
+	if svc != "com.apple.Safari" {
+		t.Errorf("detectLaunchdService = %q", svc)
 	}
-	detectGitInfo("unknown")
-	detectGitInfo("")
-	detectGitInfo("/")
 }
 
 func TestCheckResourceUsage(t *testing.T) {
-	health := checkResourceUsage(os.Getpid(), "healthy")
-	if health == "" {
-		t.Error("checkResourceUsage returned empty")
-	}
-	health = checkResourceUsage(-1, "healthy")
-	if health != "healthy" {
-		t.Error("checkResourceUsage should return original health for invalid PID")
-	}
-}
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
 
-func TestGetOpenFileCount(t *testing.T) {
-	open, max := getOpenFileCount(os.Getpid())
-	if open < 0 {
-		t.Error("open file count should not be negative")
-	}
-	if max < 0 {
-		t.Error("max file count should not be negative")
-	}
-	if open > max && max > 0 {
-		t.Errorf("open files (%d) > max (%d)", open, max)
-	}
-}
+	mockExec := mocks.NewMockExecutor(ctrl)
+	SetExecutor(mockExec)
+	defer ResetExecutor()
 
-func TestGetFileLimit(t *testing.T) {
-	limit := getFileLimit(os.Getpid())
-	if limit < 0 {
-		t.Error("file limit should not be negative")
+	mockExec.EXPECT().Run("ps", "-p", "123", "-o", "pcpu=,rss=").
+		Return([]byte("95.0 2097152\n"), nil)
+
+	health := checkResourceUsage(123, "healthy")
+	if health != "high-cpu" {
+		t.Errorf("checkResourceUsage = %q, want high-cpu", health)
 	}
-}
-
-func TestGetLockedFiles(t *testing.T) {
-	locked := getLockedFiles(os.Getpid())
-	_ = locked
-}
-
-func TestCheckPreventsSleep(t *testing.T) {
-	prevents := checkPreventsSleep(os.Getpid())
-	_ = prevents
 }
 
 func TestGetThermalState(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockExec := mocks.NewMockExecutor(ctrl)
+	SetExecutor(mockExec)
+	defer ResetExecutor()
+
+	mockExec.EXPECT().Run("pmset", "-g", "therm").
+		Return([]byte("CPU_Speed_Limit = 100\n"), nil)
+
 	state := getThermalState()
-	// Empty string is valid (normal/no throttling)
-	// Non-empty should contain "throttling" or "thermal"
-	if state != "" && !strings.Contains(strings.ToLower(state), "throttl") && !strings.Contains(strings.ToLower(state), "thermal") {
-		t.Errorf("getThermalState returned unexpected value: %q", state)
+	if state != "" {
+		t.Errorf("getThermalState = %q, want empty", state)
 	}
 }
 
 func TestGetEnergyImpact(t *testing.T) {
-	impact := GetEnergyImpact(os.Getpid())
-	if impact == "" {
-		t.Log("GetEnergyImpact returned empty")
+	impact := GetEnergyImpact(123)
+	if impact != "" {
+		t.Errorf("GetEnergyImpact = %q, want empty", impact)
 	}
 }

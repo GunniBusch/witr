@@ -32,8 +32,13 @@ func TestDetectSupervisor(t *testing.T) {
 			if tt.wantNil && got != nil {
 				t.Errorf("detectSupervisor() = %v, want nil", got)
 			}
-			if !tt.wantNil && (got == nil || got.Name != tt.wantName) {
-				t.Errorf("detectSupervisor() = %v, want %v", got, tt.wantName)
+			if !tt.wantNil {
+				if got == nil {
+					t.Fatalf("detectSupervisor() = nil, want %v", tt.wantName)
+				}
+				if got.Type != model.SourceSupervisor || got.Name != tt.wantName {
+					t.Errorf("detectSupervisor() = %v, want Type=supervisor Name=%v", got, tt.wantName)
+				}
 			}
 		})
 	}

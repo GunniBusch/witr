@@ -3,9 +3,15 @@
 package target
 
 import (
+	"errors"
+	"fmt"
+	"os"
 	"testing"
 
+	"github.com/pranshuparmar/witr/internal/proc"
+	"github.com/pranshuparmar/witr/internal/proc/mocks"
 	"github.com/pranshuparmar/witr/pkg/model"
+	"go.uber.org/mock/gomock"
 )
 
 func TestResolve(t *testing.T) {
@@ -58,43 +64,160 @@ func TestIsValidServiceLabel(t *testing.T) {
 	}
 }
 
-func TestResolveName(t *testing.T) {
-	// BUG: ResolveName calls os.Exit(1) for ambiguous names
-	// Cannot test with common names like "bash" as it crashes the test runner
-	// Testing only with names that won't match anything
-	_, err := ResolveName("nonexistent_process_xyz123")
-	if err == nil {
-		t.Error("ResolveName should fail for nonexistent process")
-	}
+func TestResolvePortUsesLsofAndReturnsLowestPID(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
 
-	// Test with a PID-like string (should not match as name)
-	_, err = ResolveName("1234567890")
-	if err == nil {
-		t.Log("ResolveName matched PID-like string as process name")
-	}
-}
+	mockExec := mocks.NewMockExecutor(ctrl)
+	proc.SetExecutor(mockExec)
+	defer proc.ResetExecutor()
 
-func TestResolvePort(t *testing.T) {
-	_, err := ResolvePort(99999)
-	if err == nil {
-		t.Log("ResolvePort(99999) found something (unexpected)")
+	mockExec.EXPECT().Run("lsof", "-i", "TCP:8080", "-s", "TCP:LISTEN", "-n", "-P", "-t").
+		Return([]byte("456\n123\n"), nil)
+
+	pids, err := ResolvePort(8080)
+	if err != nil {
+		t.Fatalf("ResolvePort error = %v", err)
+	}
+	if len(pids) != 1 || pids[0] != 123 {
+		t.Fatalf("ResolvePort returned %v, want [123]", pids)
 	}
 }
 
-func TestResolveLaunchdServicePID(t *testing.T) {
-	_, err := resolveLaunchdServicePID("nonexistent.service.xyz")
-	if err == nil {
-		t.Error("resolveLaunchdServicePID should fail for nonexistent service")
-	}
+func TestResolvePortFallsBackToNetstat(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
 
-	// Test invalid name
-	_, err = resolveLaunchdServicePID("invalid/name")
-	if err == nil {
-		t.Error("resolveLaunchdServicePID should reject invalid names")
+	mockExec := mocks.NewMockExecutor(ctrl)
+	proc.SetExecutor(mockExec)
+	defer proc.ResetExecutor()
+
+	netstatOut := "tcp4 0 0 *.8080 *.* LISTEN 0 0 4321\n"
+
+	gomock.InOrder(
+		mockExec.EXPECT().Run("lsof", "-i", "TCP:8080", "-s", "TCP:LISTEN", "-n", "-P", "-t").
+			Return(nil, errors.New("lsof failed")),
+		mockExec.EXPECT().Run("netstat", "-anv", "-p", "tcp").
+			Return([]byte(netstatOut), nil),
+	)
+
+	pids, err := ResolvePort(8080)
+	if err != nil {
+		t.Fatalf("ResolvePort fallback error = %v", err)
+	}
+	if len(pids) != 1 || pids[0] != 4321 {
+		t.Fatalf("ResolvePort fallback returned %v, want [4321]", pids)
 	}
 }
 
-func TestResolvePortNetstat(t *testing.T) {
-	_, _ = resolvePortNetstat(80)
-	_, _ = resolvePortNetstat(99999)
+func TestResolvePortNoListener(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockExec := mocks.NewMockExecutor(ctrl)
+	proc.SetExecutor(mockExec)
+	defer proc.ResetExecutor()
+
+	mockExec.EXPECT().Run("lsof", "-i", "TCP:8080", "-s", "TCP:LISTEN", "-n", "-P", "-t").
+		Return([]byte("\n"), nil)
+
+	_, err := ResolvePort(8080)
+	if err == nil {
+		t.Fatal("ResolvePort should fail when no listener is found")
+	}
+}
+
+func TestResolvePortFallbackNoMatch(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockExec := mocks.NewMockExecutor(ctrl)
+	proc.SetExecutor(mockExec)
+	defer proc.ResetExecutor()
+
+	gomock.InOrder(
+		mockExec.EXPECT().Run("lsof", "-i", "TCP:8080", "-s", "TCP:LISTEN", "-n", "-P", "-t").
+			Return(nil, errors.New("lsof failed")),
+		mockExec.EXPECT().Run("netstat", "-anv", "-p", "tcp").
+			Return([]byte("tcp4 0 0 *.22 *.* LISTEN 0 0 22\n"), nil),
+	)
+
+	_, err := ResolvePort(8080)
+	if err == nil {
+		t.Fatal("ResolvePort should fail when netstat finds no listener")
+	}
+}
+
+func TestResolveNameMatchesProcessAndSkipsGrepAndWitr(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockExec := mocks.NewMockExecutor(ctrl)
+	proc.SetExecutor(mockExec)
+	defer proc.ResetExecutor()
+
+	self := os.Getpid()
+	parent := os.Getppid()
+	pid := self + 1000
+	if pid == parent {
+		pid += 1000
+	}
+	grepPid := pid + 1
+	if grepPid == parent {
+		grepPid++
+	}
+	witrPid := grepPid + 1
+	if witrPid == parent {
+		witrPid++
+	}
+
+	psOut := fmt.Sprintf(" %d myapp /usr/bin/myapp --flag\n %d grep grep myapp\n %d sh /usr/bin/witr myapp\n", pid, grepPid, witrPid)
+
+	gomock.InOrder(
+		mockExec.EXPECT().Run("ps", "-axo", "pid=,comm=,args=").Return([]byte(psOut), nil),
+		mockExec.EXPECT().Run("launchctl", "print", "system/myapp").Return(nil, errors.New("not found")),
+		mockExec.EXPECT().Run("launchctl", "print", "system/com.apple.myapp").Return(nil, errors.New("not found")),
+		mockExec.EXPECT().Run("launchctl", "print", "system/org.myapp").Return(nil, errors.New("not found")),
+		mockExec.EXPECT().Run("launchctl", "print", "system/io.myapp").Return(nil, errors.New("not found")),
+	)
+
+	pids, err := ResolveName("myapp")
+	if err != nil {
+		t.Fatalf("ResolveName error = %v", err)
+	}
+	if len(pids) != 1 || pids[0] != pid {
+		t.Fatalf("ResolveName returned %v, want [%d]", pids, pid)
+	}
+}
+
+func TestResolveNameServiceOnly(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockExec := mocks.NewMockExecutor(ctrl)
+	proc.SetExecutor(mockExec)
+	defer proc.ResetExecutor()
+
+	psOut := " 1 launchd /sbin/launchd\n"
+	serviceOut := "pid = 4321\n"
+
+	gomock.InOrder(
+		mockExec.EXPECT().Run("ps", "-axo", "pid=,comm=,args=").Return([]byte(psOut), nil),
+		mockExec.EXPECT().Run("launchctl", "print", "system/myservice").Return([]byte(serviceOut), nil),
+	)
+
+	pids, err := ResolveName("myservice")
+	if err != nil {
+		t.Fatalf("ResolveName error = %v", err)
+	}
+	if len(pids) != 1 || pids[0] != 4321 {
+		t.Fatalf("ResolveName returned %v, want [4321]", pids)
+	}
+}
+
+func TestResolveLaunchdServicePIDRejectsInvalidName(t *testing.T) {
+	_, err := resolveLaunchdServicePID("invalid/name")
+	if err == nil {
+		t.Fatal("resolveLaunchdServicePID should reject invalid names")
+	}
 }

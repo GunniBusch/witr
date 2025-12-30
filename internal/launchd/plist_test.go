@@ -3,7 +3,15 @@
 package launchd
 
 import (
+	"errors"
+	"os"
+	"path/filepath"
+	"reflect"
 	"testing"
+
+	"github.com/pranshuparmar/witr/internal/proc"
+	"github.com/pranshuparmar/witr/internal/proc/mocks"
+	"go.uber.org/mock/gomock"
 )
 
 func TestFormatDuration(t *testing.T) {
@@ -25,21 +33,29 @@ func TestFormatTriggers(t *testing.T) {
 	tests := []struct {
 		name string
 		info LaunchdInfo
-		want int
+		want []string
 	}{
-		{"runAtLoad", LaunchdInfo{RunAtLoad: true}, 1},
-		{"interval", LaunchdInfo{StartInterval: 3600}, 1},
-		{"multiple", LaunchdInfo{RunAtLoad: true, StartInterval: 300, WatchPaths: []string{"/tmp"}}, 3},
-		{"queue", LaunchdInfo{QueueDirectories: []string{"/var/spool"}}, 1},
-		{"none", LaunchdInfo{}, 0},
-		{"calendar", LaunchdInfo{StartCalendarInterval: "daily"}, 1},
-		{"multiWatch", LaunchdInfo{WatchPaths: []string{"/a", "/b"}}, 2},
-		{"multiQueue", LaunchdInfo{QueueDirectories: []string{"/a", "/b"}}, 2},
+		{"runAtLoad", LaunchdInfo{RunAtLoad: true}, []string{"RunAtLoad (starts at login/boot)"}},
+		{"interval", LaunchdInfo{StartInterval: 3600}, []string{"StartInterval (every 1h)"}},
+		{
+			"multiple",
+			LaunchdInfo{RunAtLoad: true, StartInterval: 300, WatchPaths: []string{"/tmp"}},
+			[]string{
+				"RunAtLoad (starts at login/boot)",
+				"StartInterval (every 5m)",
+				"WatchPaths: /tmp",
+			},
+		},
+		{"queue", LaunchdInfo{QueueDirectories: []string{"/var/spool"}}, []string{"QueueDirectories: /var/spool"}},
+		{"none", LaunchdInfo{}, nil},
+		{"calendar", LaunchdInfo{StartCalendarInterval: "daily"}, []string{"StartCalendarInterval (daily)"}},
+		{"multiWatch", LaunchdInfo{WatchPaths: []string{"/a", "/b"}}, []string{"WatchPaths: /a", "WatchPaths: /b"}},
+		{"multiQueue", LaunchdInfo{QueueDirectories: []string{"/a", "/b"}}, []string{"QueueDirectories: /a", "QueueDirectories: /b"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := len(tt.info.FormatTriggers()); got != tt.want {
-				t.Errorf("FormatTriggers() len = %d, want %d", got, tt.want)
+			if got := tt.info.FormatTriggers(); !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("FormatTriggers() = %v, want %v", got, tt.want)
 			}
 		})
 	}
@@ -117,27 +133,163 @@ func TestHandleArrayValue(t *testing.T) {
 }
 
 func TestGetServiceLabel(t *testing.T) {
-	_, _, _ = GetServiceLabel(1)
-	_, _, _ = GetServiceLabel(99999)
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockExec := mocks.NewMockExecutor(ctrl)
+	proc.SetExecutor(mockExec)
+	defer proc.ResetExecutor()
+
+	// 1. Success case
+	// launchctl blame <pid> -> returns "domain service reason"
+	mockExec.EXPECT().Run("launchctl", "blame", "123").Return([]byte("system/com.apple.finder semantic"), nil)
+
+	_, _, err := GetServiceLabel(123)
+	if err != nil {
+		t.Errorf("GetServiceLabel failed: %v", err)
+	}
+
+	// 2. Failure case
+	mockExec.EXPECT().Run("launchctl", "blame", "99999").Return(nil, errors.New("process not found"))
+	_, _, err = GetServiceLabel(99999)
+	if err == nil {
+		t.Error("GetServiceLabel should fail for nonexistent PID")
+	}
 }
 
 func TestFindServiceByPID(t *testing.T) {
-	_, _ = findServiceByPID(1)
-	_, _ = findServiceByPID(99999)
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockExec := mocks.NewMockExecutor(ctrl)
+	proc.SetExecutor(mockExec)
+	defer proc.ResetExecutor()
+
+	// Mock list output
+	output := `PID	Status	Label
+123	0	com.test.service
+456	0	com.other.service
+`
+	// 1. Found
+	mockExec.EXPECT().Run("launchctl", "list").Return([]byte(output), nil)
+	label, _ := findServiceByPID(123)
+	if label != "com.test.service" {
+		t.Errorf("findServiceByPID(123) = %q, want com.test.service", label)
+	}
+
+	// 2. Not found
+	mockExec.EXPECT().Run("launchctl", "list").Return([]byte(output), nil)
+	label, _ = findServiceByPID(999)
+	if label != "" {
+		t.Errorf("findServiceByPID(999) found %q, want empty", label)
+	}
+
+	// 3. Error case
+	mockExec.EXPECT().Run("launchctl", "list").Return(nil, errors.New("failed"))
+	findServiceByPID(1)
 }
 
 func TestFindPlistPath(t *testing.T) {
-	_ = FindPlistPath("com.apple.finder")
-	_ = FindPlistPath("nonexistent.service.xyz123")
+	dir := t.TempDir()
+	origPaths := plistSearchPaths
+	plistSearchPaths = []string{dir}
+	defer func() { plistSearchPaths = origPaths }()
+
+	label := "com.test.service"
+	path := filepath.Join(dir, label+".plist")
+	if err := os.WriteFile(path, []byte("dummy"), 0o644); err != nil {
+		t.Fatalf("WriteFile failed: %v", err)
+	}
+
+	if got := FindPlistPath(label); got != path {
+		t.Fatalf("FindPlistPath = %q, want %q", got, path)
+	}
+	if got := FindPlistPath("nonexistent.service.xyz123"); got != "" {
+		t.Fatalf("FindPlistPath for missing label = %q, want empty", got)
+	}
 }
 
 func TestParsePlist(t *testing.T) {
-	_, _ = ParsePlist("/nonexistent/path.plist")
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockExec := mocks.NewMockExecutor(ctrl)
+	proc.SetExecutor(mockExec)
+	defer proc.ResetExecutor()
+
+	// 1. Success
+	xml := `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.test.plist</string>
+</dict>
+</plist>`
+	mockExec.EXPECT().Run("plutil", "-convert", "xml1", "-o", "-", "/path/to/test.plist").Return([]byte(xml), nil)
+
+	info, err := ParsePlist("/path/to/test.plist")
+	if err != nil {
+		t.Errorf("ParsePlist failed: %v", err)
+	}
+	if info.Label != "com.test.plist" {
+		t.Errorf("ParsePlist label = %q, want com.test.plist", info.Label)
+	}
+
+	// 2. Failure
+	mockExec.EXPECT().Run("plutil", "-convert", "xml1", "-o", "-", "/nonexistent.plist").Return(nil, errors.New("file not found"))
+	_, err = ParsePlist("/nonexistent.plist")
+	if err == nil {
+		t.Error("ParsePlist should fail for nonexistent file")
+	}
 }
 
 func TestGetLaunchdInfo(t *testing.T) {
-	_, _ = GetLaunchdInfo(1)
-	_, _ = GetLaunchdInfo(99999)
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockExec := mocks.NewMockExecutor(ctrl)
+	proc.SetExecutor(mockExec)
+	defer proc.ResetExecutor()
+
+	dir := t.TempDir()
+	origPaths := plistSearchPaths
+	plistSearchPaths = []string{dir}
+	defer func() { plistSearchPaths = origPaths }()
+
+	label := "com.test.service"
+	path := filepath.Join(dir, label+".plist")
+	if err := os.WriteFile(path, []byte("dummy"), 0o644); err != nil {
+		t.Fatalf("WriteFile failed: %v", err)
+	}
+
+	xml := `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>` + label + `</string>
+</dict>
+</plist>`
+
+	gomock.InOrder(
+		mockExec.EXPECT().Run("launchctl", "blame", "123").Return([]byte("system/"+label), nil),
+		mockExec.EXPECT().Run("plutil", "-convert", "xml1", "-o", "-", path).Return([]byte(xml), nil),
+	)
+
+	info, err := GetLaunchdInfo(123)
+	if err != nil {
+		t.Fatalf("GetLaunchdInfo failed: %v", err)
+	}
+	if info.Label != label {
+		t.Fatalf("GetLaunchdInfo label = %q, want %q", info.Label, label)
+	}
+	if info.Domain != "system" {
+		t.Fatalf("GetLaunchdInfo domain = %q, want system", info.Domain)
+	}
+	if info.PlistPath != path {
+		t.Fatalf("GetLaunchdInfo plist path = %q, want %q", info.PlistPath, path)
+	}
 }
 
 func TestParsePlistXML(t *testing.T) {
@@ -186,5 +338,10 @@ func TestParsePlistXML(t *testing.T) {
 
 func TestParsePlistXMLEmpty(t *testing.T) {
 	info := &LaunchdInfo{}
-	_ = parsePlistXML([]byte(""), info)
+	if err := parsePlistXML([]byte(""), info); err != nil {
+		t.Fatalf("parsePlistXML empty returned error: %v", err)
+	}
+	if info.Label != "" {
+		t.Fatalf("parsePlistXML empty label = %q, want empty", info.Label)
+	}
 }

@@ -13,18 +13,23 @@ func TestDetect(t *testing.T) {
 		name     string
 		ancestry []model.Process
 		wantType model.SourceType
+		wantName string
 	}{
-		{"shell - bash", []model.Process{{Command: "bash"}, {Command: "myapp"}}, model.SourceShell},
-		{"supervisor - pm2", []model.Process{{Command: "pm2"}, {Command: "node"}}, model.SourceSupervisor},
-		{"cron", []model.Process{{Command: "cron"}, {Command: "backup.sh"}}, model.SourceCron},
-		{"unknown - empty", []model.Process{}, model.SourceUnknown},
-		{"unknown - no match", []model.Process{{Command: "unknown_process"}}, model.SourceUnknown},
-		{"supervisor priority", []model.Process{{Command: "bash"}, {Command: "supervisord"}, {Command: "myapp"}}, model.SourceSupervisor},
+		{"shell - bash", []model.Process{{PID: 0, Command: "bash"}, {PID: 0, Command: "myapp"}}, model.SourceShell, "bash"},
+		{"supervisor - pm2", []model.Process{{PID: 0, Command: "pm2"}, {PID: 0, Command: "node"}}, model.SourceSupervisor, "pm2"},
+		{"cron", []model.Process{{PID: 0, Command: "cron"}, {PID: 0, Command: "backup.sh"}}, model.SourceCron, "cron"},
+		{"unknown - empty", []model.Process{}, model.SourceUnknown, ""},
+		{"unknown - no match", []model.Process{{PID: 0, Command: "unknown_process"}}, model.SourceUnknown, ""},
+		{"supervisor priority", []model.Process{{PID: 0, Command: "bash"}, {PID: 0, Command: "supervisord"}, {PID: 0, Command: "myapp"}}, model.SourceSupervisor, "supervisord"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := Detect(tt.ancestry); got.Type != tt.wantType {
-				t.Errorf("Detect() = %v, want %v", got.Type, tt.wantType)
+			got := Detect(tt.ancestry)
+			if got.Type != tt.wantType {
+				t.Errorf("Detect() type = %v, want %v", got.Type, tt.wantType)
+			}
+			if got.Name != tt.wantName {
+				t.Errorf("Detect() name = %v, want %v", got.Name, tt.wantName)
 			}
 		})
 	}

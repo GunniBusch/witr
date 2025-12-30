@@ -1,5 +1,3 @@
-//go:build darwin
-
 package proc
 
 import "os/exec"
@@ -24,4 +22,9 @@ func SetExecutor(e Executor) {
 
 func ResetExecutor() {
 	executor = &RealExecutor{}
+}
+
+// Run executes a command using the current executor
+func Run(name string, args ...string) ([]byte, error) {
+	return executor.Run(name, args...)
 }

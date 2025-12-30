@@ -23,8 +23,13 @@ func TestDetectCron(t *testing.T) {
 			if tt.wantNil && got != nil {
 				t.Errorf("detectCron() = %v, want nil", got)
 			}
-			if !tt.wantNil && got == nil {
-				t.Error("detectCron() = nil, want non-nil")
+			if !tt.wantNil {
+				if got == nil {
+					t.Fatal("detectCron() = nil, want non-nil")
+				}
+				if got.Type != model.SourceCron || got.Name != "cron" {
+					t.Errorf("detectCron() = %v, want Type=cron Name=cron", got)
+				}
 			}
 		})
 	}

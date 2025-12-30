@@ -26,8 +26,13 @@ func TestDetectShell(t *testing.T) {
 			if tt.wantNil && got != nil {
 				t.Errorf("detectShell() = %v, want nil", got)
 			}
-			if !tt.wantNil && (got == nil || got.Name != tt.wantName) {
-				t.Errorf("detectShell() name = %v, want %v", got, tt.wantName)
+			if !tt.wantNil {
+				if got == nil {
+					t.Fatalf("detectShell() = nil, want %v", tt.wantName)
+				}
+				if got.Type != model.SourceShell || got.Name != tt.wantName {
+					t.Errorf("detectShell() = %v, want Type=shell Name=%v", got, tt.wantName)
+				}
 			}
 		})
 	}
