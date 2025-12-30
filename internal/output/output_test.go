@@ -1,12 +1,42 @@
 package output
 
 import (
+	"bytes"
 	"encoding/json"
+	"io"
+	"os"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/pranshuparmar/witr/pkg/model"
 )
+
+func captureOutput(t *testing.T, fn func()) string {
+	t.Helper()
+
+	orig := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe failed: %v", err)
+	}
+	os.Stdout = w
+
+	outCh := make(chan string)
+	go func() {
+		var buf bytes.Buffer
+		_, _ = io.Copy(&buf, r)
+		outCh <- buf.String()
+	}()
+
+	fn()
+	_ = w.Close()
+	os.Stdout = orig
+
+	out := <-outCh
+	_ = r.Close()
+	return out
+}
 
 func TestToJSON(t *testing.T) {
 	tests := []struct {
@@ -59,17 +89,43 @@ func TestFormatDetailLabel(t *testing.T) {
 }
 
 func TestRenderWarnings(t *testing.T) {
-	RenderWarnings(nil, false)
-	RenderWarnings([]string{}, true)
-	RenderWarnings([]string{"warning1"}, false)
-	RenderWarnings([]string{"warning1", "warning2"}, true)
+	out := captureOutput(t, func() { RenderWarnings(nil, false) })
+	if !strings.Contains(out, "No warnings.") {
+		t.Fatalf("RenderWarnings(nil,false) = %q", out)
+	}
+
+	out = captureOutput(t, func() { RenderWarnings([]string{}, true) })
+	if !strings.Contains(out, "No warnings.") {
+		t.Fatalf("RenderWarnings(empty,true) = %q", out)
+	}
+
+	out = captureOutput(t, func() { RenderWarnings([]string{"warning1"}, false) })
+	if !strings.Contains(out, "Warnings:") || !strings.Contains(out, "warning1") {
+		t.Fatalf("RenderWarnings(single,false) = %q", out)
+	}
+
+	out = captureOutput(t, func() { RenderWarnings([]string{"warning1", "warning2"}, true) })
+	if !strings.Contains(out, "Warnings") || !strings.Contains(out, "warning2") {
+		t.Fatalf("RenderWarnings(multi,true) = %q", out)
+	}
 }
 
 func TestRenderEnvOnly(t *testing.T) {
 	proc := model.Process{Cmdline: "test --flag", Env: []string{"VAR=val", "PATH=/bin"}}
-	RenderEnvOnly(proc, false)
-	RenderEnvOnly(proc, true)
-	RenderEnvOnly(model.Process{Cmdline: "test"}, true)
+	out := captureOutput(t, func() { RenderEnvOnly(proc, false) })
+	if !strings.Contains(out, "Command     : test --flag") || !strings.Contains(out, "VAR=val") {
+		t.Fatalf("RenderEnvOnly(false) = %q", out)
+	}
+
+	out = captureOutput(t, func() { RenderEnvOnly(proc, true) })
+	if !strings.Contains(out, "Command") || !strings.Contains(out, "PATH=/bin") {
+		t.Fatalf("RenderEnvOnly(true) = %q", out)
+	}
+
+	out = captureOutput(t, func() { RenderEnvOnly(model.Process{Cmdline: "test"}, true) })
+	if !strings.Contains(out, "No environment variables found.") {
+		t.Fatalf("RenderEnvOnly(no env) = %q", out)
+	}
 }
 
 func TestRenderShort(t *testing.T) {
@@ -78,8 +134,14 @@ func TestRenderShort(t *testing.T) {
 		{PID: 100, Command: "bash"},
 		{PID: 200, Command: "test"},
 	}}
-	RenderShort(result, false)
-	RenderShort(result, true)
+	out := captureOutput(t, func() { RenderShort(result, false) })
+	if strings.TrimSpace(out) != "init (pid 1) → bash (pid 100) → test (pid 200)" {
+		t.Fatalf("RenderShort(false) = %q", out)
+	}
+	out = captureOutput(t, func() { RenderShort(result, true) })
+	if strings.TrimSpace(out) == "" {
+		t.Fatal("RenderShort(true) produced empty output")
+	}
 }
 
 func TestPrintTree(t *testing.T) {
@@ -88,9 +150,18 @@ func TestPrintTree(t *testing.T) {
 		{PID: 100, Command: "bash"},
 		{PID: 200, Command: "test"},
 	}
-	PrintTree(chain, false)
-	PrintTree(chain, true)
-	PrintTree([]model.Process{{PID: 1}}, true)
+	out := captureOutput(t, func() { PrintTree(chain, false) })
+	if !strings.Contains(out, "init (pid 1)") || !strings.Contains(out, "└─ bash (pid 100)") {
+		t.Fatalf("PrintTree(false) = %q", out)
+	}
+	out = captureOutput(t, func() { PrintTree(chain, true) })
+	if !strings.Contains(out, "└─") {
+		t.Fatalf("PrintTree(true) = %q", out)
+	}
+	out = captureOutput(t, func() { PrintTree([]model.Process{{PID: 1}}, true) })
+	if !strings.Contains(out, "pid 1") {
+		t.Fatalf("PrintTree(single) = %q", out)
+	}
 }
 
 func TestRenderStandard(t *testing.T) {
@@ -107,8 +178,18 @@ func TestRenderStandard(t *testing.T) {
 		},
 		Warnings: []string{"warning1", "warning2"},
 	}
-	RenderStandard(result, false)
-	RenderStandard(result, true)
+	out := captureOutput(t, func() { RenderStandard(result, false) })
+	if !strings.Contains(out, "Target      : test") || !strings.Contains(out, "Process     : test (pid 200)") {
+		t.Fatalf("RenderStandard(false) = %q", out)
+	}
+	if !strings.Contains(out, "Listening   : 0.0.0.0:8080") || !strings.Contains(out, "Warnings    :") {
+		t.Fatalf("RenderStandard(false) missing sections: %q", out)
+	}
+
+	out = captureOutput(t, func() { RenderStandard(result, true) })
+	if !strings.Contains(out, "Process") {
+		t.Fatalf("RenderStandard(true) = %q", out)
+	}
 
 	launchdResult := model.Result{
 		Ancestry: []model.Process{{PID: 1, Command: "launchd"}, {PID: 100}},
@@ -123,7 +204,10 @@ func TestRenderStandard(t *testing.T) {
 			},
 		},
 	}
-	RenderStandard(launchdResult, false)
+	out = captureOutput(t, func() { RenderStandard(launchdResult, false) })
+	if !strings.Contains(out, "Source      : com.test.service (launchd)") {
+		t.Fatalf("RenderStandard(launchd) = %q", out)
+	}
 }
 
 func TestRenderStandardEmpty(t *testing.T) {

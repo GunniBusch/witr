@@ -172,6 +172,7 @@ func TestResolveNameMatchesProcessAndSkipsGrepAndWitr(t *testing.T) {
 	}
 
 	psOut := fmt.Sprintf(" %d myapp /usr/bin/myapp --flag\n %d grep grep myapp\n %d sh /usr/bin/witr myapp\n", pid, grepPid, witrPid)
+	psOut = fmt.Sprintf(" %d myapp /usr/bin/myapp --flag\n %d myapp /usr/bin/myapp --self\n %d grep grep myapp\n %d sh /usr/bin/witr myapp\n", pid, self, grepPid, witrPid)
 
 	gomock.InOrder(
 		mockExec.EXPECT().Run("ps", "-axo", "pid=,comm=,args=").Return([]byte(psOut), nil),
@@ -219,5 +220,25 @@ func TestResolveLaunchdServicePIDRejectsInvalidName(t *testing.T) {
 	_, err := resolveLaunchdServicePID("invalid/name")
 	if err == nil {
 		t.Fatal("resolveLaunchdServicePID should reject invalid names")
+	}
+}
+
+func TestResolveLaunchdServicePIDParsesPID(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockExec := mocks.NewMockExecutor(ctrl)
+	proc.SetExecutor(mockExec)
+	defer proc.ResetExecutor()
+
+	mockExec.EXPECT().Run("launchctl", "print", "system/myservice").
+		Return([]byte("pid = 555\n"), nil)
+
+	pid, err := resolveLaunchdServicePID("myservice")
+	if err != nil {
+		t.Fatalf("resolveLaunchdServicePID error = %v", err)
+	}
+	if pid != 555 {
+		t.Fatalf("resolveLaunchdServicePID pid = %d, want 555", pid)
 	}
 }
