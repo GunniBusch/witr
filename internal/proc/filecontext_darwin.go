@@ -3,6 +3,8 @@
 package proc
 
 import (
+	"os/exec"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -118,7 +120,7 @@ func getLockedFiles(pid int) []string {
 			if strings.HasSuffix(fileName, ".lock") ||
 				strings.HasSuffix(fileName, ".pid") ||
 				strings.Contains(fileName, "/lock") {
-				if !containsString(locked, fileName) {
+				if !slices.Contains(locked, fileName) {
 					locked = append(locked, fileName)
 				}
 			}
@@ -140,7 +142,7 @@ func getLockedFiles(pid int) []string {
 					// This file has a lock
 					if len(fields) >= 9 {
 						fileName := fields[8]
-						if !containsString(locked, fileName) {
+						if !slices.Contains(locked, fileName) {
 							locked = append(locked, fileName)
 						}
 					}
@@ -150,14 +152,4 @@ func getLockedFiles(pid int) []string {
 	}
 
 	return locked
-}
-
-// containsString checks if a slice contains a string
-func containsString(slice []string, s string) bool {
-	for _, item := range slice {
-		if item == s {
-			return true
-		}
-	}
-	return false
 }
