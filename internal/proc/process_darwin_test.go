@@ -233,6 +233,51 @@ func TestGetSocketStateForPort(t *testing.T) {
 	}
 }
 
+func TestGetSocketStateForPortPrefersProblematic(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockExec := mocks.NewMockExecutor(ctrl)
+	SetExecutor(mockExec)
+	defer ResetExecutor()
+
+	netstatOutput := "tcp4  0  0  127.0.0.1.8080  127.0.0.1.55555  TIME_WAIT\n" +
+		"tcp4  0  0  *.8080  *.*  LISTEN\n"
+
+	mockExec.EXPECT().Run("netstat", "-an", "-p", "tcp").
+		Return([]byte(netstatOutput), nil)
+
+	state := GetSocketStateForPort(8080)
+	if state == nil {
+		t.Fatal("GetSocketStateForPort returned nil")
+	}
+	if state.State != "TIME_WAIT" {
+		t.Errorf("GetSocketStateForPort state = %q, want TIME_WAIT", state.State)
+	}
+}
+
+func TestGetSocketStatesFiltersPort(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockExec := mocks.NewMockExecutor(ctrl)
+	SetExecutor(mockExec)
+	defer ResetExecutor()
+
+	netstatOutput := "tcp4  0  0  *.9090  *.*  LISTEN\n"
+
+	mockExec.EXPECT().Run("netstat", "-an", "-p", "tcp").
+		Return([]byte(netstatOutput), nil)
+
+	states, err := GetSocketStates(8080)
+	if err != nil {
+		t.Fatalf("GetSocketStates failed: %v", err)
+	}
+	if len(states) != 0 {
+		t.Fatalf("GetSocketStates returned %d entries, want 0", len(states))
+	}
+}
+
 func TestCountSocketsByState(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
@@ -325,6 +370,23 @@ func TestGetCommandLine(t *testing.T) {
 	}
 }
 
+func TestGetCommandLineError(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockExec := mocks.NewMockExecutor(ctrl)
+	SetExecutor(mockExec)
+	defer ResetExecutor()
+
+	mockExec.EXPECT().Run("ps", "-p", "123", "-o", "args=").
+		Return(nil, errors.New("ps failed"))
+
+	cmdline := getCommandLine(123)
+	if cmdline != "" {
+		t.Errorf("getCommandLine = %q, want empty", cmdline)
+	}
+}
+
 func TestGetEnvironment(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
@@ -356,6 +418,23 @@ func TestGetWorkingDirectory(t *testing.T) {
 	cwd := getWorkingDirectory(123)
 	if cwd != "/Users/test/project" {
 		t.Errorf("getWorkingDirectory = %q", cwd)
+	}
+}
+
+func TestGetWorkingDirectoryNoCwd(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockExec := mocks.NewMockExecutor(ctrl)
+	SetExecutor(mockExec)
+	defer ResetExecutor()
+
+	mockExec.EXPECT().Run("lsof", "-a", "-p", "123", "-d", "cwd", "-F", "n").
+		Return([]byte("p123\n"), nil)
+
+	cwd := getWorkingDirectory(123)
+	if cwd != "unknown" {
+		t.Errorf("getWorkingDirectory = %q, want unknown", cwd)
 	}
 }
 
@@ -407,6 +486,23 @@ func TestCheckResourceUsage(t *testing.T) {
 	health := checkResourceUsage(123, "healthy")
 	if health != "high-cpu" {
 		t.Errorf("checkResourceUsage = %q, want high-cpu", health)
+	}
+}
+
+func TestCheckResourceUsageHighMem(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockExec := mocks.NewMockExecutor(ctrl)
+	SetExecutor(mockExec)
+	defer ResetExecutor()
+
+	mockExec.EXPECT().Run("ps", "-p", "123", "-o", "pcpu=,rss=").
+		Return([]byte("10.0 2097152\n"), nil)
+
+	health := checkResourceUsage(123, "healthy")
+	if health != "high-mem" {
+		t.Errorf("checkResourceUsage = %q, want high-mem", health)
 	}
 }
 

@@ -105,3 +105,16 @@ func TestWarningsRestartCount(t *testing.T) {
 		t.Error("Expected restart warning for repeated commands")
 	}
 }
+
+func TestWarningsEmpty(t *testing.T) {
+	defer func() {
+		if r := recover(); r != nil {
+			t.Errorf("Warnings panicked on empty input: %v", r)
+		}
+	}()
+
+	warnings := Warnings([]model.Process{})
+	if len(warnings) != 0 {
+		t.Fatalf("Warnings(empty) = %v, want empty", warnings)
+	}
+}

@@ -15,11 +15,7 @@ import (
 func ReadProcess(pid int) (model.Process, error) {
 	// Read process info using ps command on macOS
 	// ps -p <pid> -o pid=,ppid=,uid=,lstart=,state=,ucomm=
-	out, err := executor.Run("ps", "-p", strconv.Itoa(pid), "-o", "pid=,ppid=,uid=,lstart=,state=,ucomm=")
-	// LC_ALL=C TZ=UTC ps -p <pid> -o pid=,ppid=,uid=,lstart=,state=,ucomm=
-	cmd := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "pid=,ppid=,uid=,lstart=,state=,ucomm=")
-	cmd.Env = buildEnvForPS()
-	out, err := cmd.Output()
+	out, err := runPSWithEnv("ps", "-p", strconv.Itoa(pid), "-o", "pid=,ppid=,uid=,lstart=,state=,ucomm=")
 	if err != nil {
 		return model.Process{}, fmt.Errorf("process %d not found: %w", pid, err)
 	}
@@ -292,6 +288,14 @@ func buildEnvForPS() []string {
 	}
 	env = append(env, "LC_ALL=C", "TZ=UTC")
 	return env
+}
+
+func runPSWithEnv(name string, args ...string) ([]byte, error) {
+	env := buildEnvForPS()
+	if envExec, ok := executor.(EnvExecutor); ok {
+		return envExec.RunWithEnv(env, name, args...)
+	}
+	return executor.Run(name, args...)
 }
 
 func checkResourceUsage(pid int, currentHealth string) string {
